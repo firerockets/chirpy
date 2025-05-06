@@ -1,9 +1,15 @@
 package main
 
 import (
+	"database/sql"
 	"log"
 	"net/http"
+	"os"
 	"sync/atomic"
+
+	"github.com/firerockets/chirpy/internal/database"
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
 
 const (
@@ -14,6 +20,7 @@ const (
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	dbQueries      *database.Queries
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -23,10 +30,26 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 
 func main() {
 
-	apiCfg := apiConfig{}
+	godotenv.Load()
+
+	dbURL := os.Getenv("DB_URL")
+
+	db, err := sql.Open("postgres", dbURL)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	dbQueries := database.New(db)
+
+	apiCfg := apiConfig{
+		fileserverHits: atomic.Int32{},
+		dbQueries:      dbQueries,
+	}
+
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/app/", apiCfg.appHandler)
+	mux.HandleFunc("GET /app/", apiCfg.appHandler)
 	mux.HandleFunc("GET /api/healthz", apiCfg.healthzHandler)
 	mux.HandleFunc("POST /api/validate_chirp", apiCfg.validateChirpHandler)
 	mux.HandleFunc("GET /admin/metrics", apiCfg.metricsHandler)
