@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"net/http"
+	"sync/atomic"
 )
 
 const (
@@ -11,15 +12,25 @@ const (
 	port           = "8080"
 )
 
+type apiConfig struct {
+	fileserverHits atomic.Int32
+}
+
+func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
+	cfg.fileserverHits.Add(1)
+	return next
+}
+
 func main() {
 
+	apiCfg := apiConfig{}
 	mux := http.NewServeMux()
 
-	// mux.Handle("/assets", http.FileServer(http.Dir(filepathAssets)))
-
-	mux.Handle("/app/", http.StripPrefix("/app/", http.FileServer(http.Dir(filepathRoot))))
-	// mux.Handle("/app/assets", http.StripPrefix("/app", http.FileServer(http.Dir(filepathAssets))))
-	mux.HandleFunc("/healthz", healthzHandler)
+	mux.HandleFunc("/app/", apiCfg.appHandler)
+	mux.HandleFunc("GET /api/healthz", apiCfg.healthzHandler)
+	mux.HandleFunc("POST /api/validate_chirp", apiCfg.validateChirpHandler)
+	mux.HandleFunc("GET /admin/metrics", apiCfg.metricsHandler)
+	mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler)
 
 	server := &http.Server{
 		Handler: mux,
@@ -30,8 +41,7 @@ func main() {
 	log.Fatal(server.ListenAndServe())
 }
 
-func healthzHandler(w http.ResponseWriter, req *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(http.StatusText(http.StatusOK)))
+func (apiCfg *apiConfig) appHandler(w http.ResponseWriter, req *http.Request) {
+	fileServerHandler := http.FileServer(http.Dir(filepathRoot))
+	apiCfg.middlewareMetricsInc(http.StripPrefix("/app", fileServerHandler)).ServeHTTP(w, req)
 }
