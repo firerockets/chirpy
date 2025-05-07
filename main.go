@@ -21,6 +21,7 @@ const (
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	dbQueries      *database.Queries
+	platform       string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -33,6 +34,7 @@ func main() {
 	godotenv.Load()
 
 	dbURL := os.Getenv("DB_URL")
+	platform := os.Getenv("PLATFORM")
 
 	db, err := sql.Open("postgres", dbURL)
 
@@ -45,13 +47,15 @@ func main() {
 	apiCfg := apiConfig{
 		fileserverHits: atomic.Int32{},
 		dbQueries:      dbQueries,
+		platform:       platform,
 	}
 
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /app/", apiCfg.appHandler)
 	mux.HandleFunc("GET /api/healthz", apiCfg.healthzHandler)
-	mux.HandleFunc("POST /api/validate_chirp", apiCfg.validateChirpHandler)
+	mux.HandleFunc("POST /api/chirps", apiCfg.createChirpHandler)
+	mux.HandleFunc("POST /api/users", apiCfg.createUserHandler)
 	mux.HandleFunc("GET /admin/metrics", apiCfg.metricsHandler)
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler)
 

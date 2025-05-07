@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 )
 
@@ -21,6 +22,15 @@ func (apiCfg *apiConfig) metricsHandler(w http.ResponseWriter, req *http.Request
 }
 
 func (apiCfg *apiConfig) resetHandler(w http.ResponseWriter, req *http.Request) {
+
+	if apiCfg.platform != "dev" {
+		respondWithError(w, "This operation is forbiden", http.StatusForbidden)
+		log.Println("Tried to run reset from non-dev env.")
+		return
+	}
+
+	apiCfg.dbQueries.DeleteAllUsers(req.Context())
+
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 
