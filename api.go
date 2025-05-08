@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/firerockets/chirpy/internal/auth"
 	"github.com/firerockets/chirpy/internal/database"
 	"github.com/google/uuid"
 )
@@ -18,11 +19,7 @@ func (apiCfg *apiConfig) healthzHandler(w http.ResponseWriter, req *http.Request
 }
 
 func (apiCfg *apiConfig) createUserHandler(w http.ResponseWriter, req *http.Request) {
-	type parameters struct {
-		Email string `json:"email"`
-	}
-
-	var params parameters
+	var params userRequest
 	decoder := json.NewDecoder(req.Body)
 	err := decoder.Decode(&params)
 
@@ -32,19 +29,23 @@ func (apiCfg *apiConfig) createUserHandler(w http.ResponseWriter, req *http.Requ
 		return
 	}
 
-	usr, err := apiCfg.dbQueries.CreateUser(req.Context(), params.Email)
+	hashedPass, err := auth.HashPassword(params.Password)
+
+	if err != nil {
+		respondWithError(w, "Something went wrong while setting the password", http.StatusInternalServerError)
+		log.Printf("Error hashing password: %s\n", err)
+		return
+	}
+
+	usr, err := apiCfg.dbQueries.CreateUser(req.Context(), database.CreateUserParams{
+		Email:          params.Email,
+		HashedPassword: hashedPass,
+	})
 
 	if err != nil {
 		respondWithError(w, "Something went wrong while creating the user in the db", http.StatusInternalServerError)
 		log.Printf("Error creating user: %s\n", err)
 		return
-	}
-
-	type userResponse struct {
-		ID        string    `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Email     string    `json:"email"`
 	}
 
 	respondWithJSON(w, http.StatusCreated, userResponse{
@@ -55,6 +56,42 @@ func (apiCfg *apiConfig) createUserHandler(w http.ResponseWriter, req *http.Requ
 	})
 
 	log.Println("User created sucessfully.")
+}
+
+func (apiCfg *apiConfig) loginHandler(w http.ResponseWriter, req *http.Request) {
+	var params userRequest
+
+	decoder := json.NewDecoder(req.Body)
+	err := decoder.Decode(&params)
+
+	if err != nil {
+		respondWithError(w, "Something went wrong while parsing the request body", http.StatusInternalServerError)
+		log.Printf("Error decoding json request: %s\n", err)
+		return
+	}
+
+	user, err := apiCfg.dbQueries.GetUserByEmail(req.Context(), params.Email)
+
+	if err != nil {
+		respondWithError(w, "Invalid user credentials", http.StatusInternalServerError)
+		log.Printf("No user found for the email - %s: %s\n", params.Email, err)
+		return
+	}
+
+	err = auth.CheckPasswordHash(user.HashedPassword, params.Password)
+
+	if err != nil {
+		respondWithError(w, "Invalid user password", http.StatusUnauthorized)
+		log.Printf("Password doesn't match with hashed value: %s\n", err)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, userResponse{
+		ID:        user.ID.String(),
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
+	})
 }
 
 func (apiCfg *apiConfig) createChirpHandler(w http.ResponseWriter, req *http.Request) {
@@ -92,15 +129,7 @@ func (apiCfg *apiConfig) createChirpHandler(w http.ResponseWriter, req *http.Req
 		return
 	}
 
-	type responseJson struct {
-		ID        string    `json:"id"`
-		CreatedAt time.Time `json:"created_at"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Body      string    `json:"body"`
-		UserID    string    `json:"user_id"`
-	}
-
-	respondWithJSON(w, http.StatusCreated, responseJson{
+	respondWithJSON(w, http.StatusCreated, chirpResponse{
 		ID:        chirp.ID.String(),
 		CreatedAt: chirp.CreatedAt,
 		UpdatedAt: chirp.UpdatedAt,
@@ -109,6 +138,78 @@ func (apiCfg *apiConfig) createChirpHandler(w http.ResponseWriter, req *http.Req
 	})
 
 	log.Println("Chirp created in the database")
+}
+
+func (apiCfg *apiConfig) getChirpsHandler(w http.ResponseWriter, req *http.Request) {
+	chirps, err := apiCfg.dbQueries.GetChirps(req.Context())
+
+	if err != nil {
+		respondWithError(w, "Error getting chirps", http.StatusInternalServerError)
+		log.Printf("Error fetching chirps from database: %s\n", err)
+		return
+	}
+
+	chirpsResponse := []chirpResponse{}
+
+	for _, c := range chirps {
+		chirpsResponse = append(chirpsResponse, chirpResponse{
+			ID:        c.ID.String(),
+			CreatedAt: c.CreatedAt,
+			UpdatedAt: c.UpdatedAt,
+			Body:      c.Body,
+			UserID:    c.UserID.String(),
+		})
+	}
+
+	respondWithJSON(w, http.StatusOK, chirpsResponse)
+}
+
+func (apiCfg *apiConfig) getChirpByIdHandler(w http.ResponseWriter, req *http.Request) {
+	chirpID, err := uuid.Parse(req.PathValue("chirpID"))
+
+	if err != nil {
+		respondWithError(w, "Invalid ID", http.StatusInternalServerError)
+		log.Printf("Error validating UUID: %s\n", err)
+		return
+	}
+
+	chirp, err := apiCfg.dbQueries.GetChirpById(req.Context(), chirpID)
+
+	if err != nil {
+		respondWithError(w, "Error getting chirp from the database", http.StatusNotFound)
+		log.Printf("Chirp id not found: %s\n", err)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, chirpResponse{
+		ID:        chirp.ID.String(),
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		UserID:    chirp.UserID.String(),
+	})
+
+	log.Printf("Successfuly returned chirp object")
+}
+
+type chirpResponse struct {
+	ID        string    `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserID    string    `json:"user_id"`
+}
+
+type userRequest struct {
+	Password string `json:"password"`
+	Email    string `json:"email"`
+}
+
+type userResponse struct {
+	ID        string    `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
 }
 
 func cleanBody(body string) string {

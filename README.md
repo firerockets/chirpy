@@ -7,6 +7,8 @@ go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest
 
 go get github.com/lib/pq
 go get github.com/joho/godotenv
+
+go get -u github.com/golang-jwt/jwt/v5
 ```
 
 ## Installing
