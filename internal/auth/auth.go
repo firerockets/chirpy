@@ -49,7 +49,7 @@ func GetBearerToken(headers http.Header) (string, error) {
 
 	splitted := strings.Split(bearer, " ")
 
-	if len(splitted) != 2 {
+	if len(splitted) != 2 || splitted[0] != "Bearer" {
 		return "", fmt.Errorf("bearer token format is wrong")
 	}
 

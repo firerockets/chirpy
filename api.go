@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -50,10 +51,11 @@ func (apiCfg *apiConfig) createUserHandler(w http.ResponseWriter, req *http.Requ
 	}
 
 	respondWithJSON(w, http.StatusCreated, userResponse{
-		ID:        usr.ID.String(),
-		CreatedAt: usr.CreatedAt,
-		UpdatedAt: usr.UpdatedAt,
-		Email:     usr.Email,
+		ID:          usr.ID.String(),
+		CreatedAt:   usr.CreatedAt,
+		UpdatedAt:   usr.UpdatedAt,
+		Email:       usr.Email,
+		IsChirpyRed: usr.IsChirpyRed,
 	})
 
 	log.Println("User created sucessfully.")
@@ -113,10 +115,11 @@ func (apiCfg *apiConfig) updateUserHandler(w http.ResponseWriter, req *http.Requ
 	}
 
 	respondWithJSON(w, http.StatusOK, userResponse{
-		ID:        usr.ID.String(),
-		CreatedAt: usr.CreatedAt,
-		UpdatedAt: usr.UpdatedAt,
-		Email:     usr.Email,
+		ID:          usr.ID.String(),
+		CreatedAt:   usr.CreatedAt,
+		UpdatedAt:   usr.UpdatedAt,
+		Email:       usr.Email,
+		IsChirpyRed: usr.IsChirpyRed,
 	})
 
 	log.Println("User updated sucessfully.")
@@ -192,6 +195,7 @@ func (apiCfg *apiConfig) loginHandler(w http.ResponseWriter, req *http.Request) 
 		Email        string    `json:"email"`
 		Token        string    `json:"token"`
 		RefreshToken string    `json:"refresh_token"`
+		IsChirpyRed  bool      `json:"is_chirpy_red"`
 	}
 
 	respondWithJSON(w, http.StatusOK, loginResponse{
@@ -201,6 +205,7 @@ func (apiCfg *apiConfig) loginHandler(w http.ResponseWriter, req *http.Request) 
 		Email:        user.Email,
 		Token:        jwt,
 		RefreshToken: refreshTokenString,
+		IsChirpyRed:  user.IsChirpyRed,
 	})
 }
 
@@ -338,11 +343,38 @@ func (apiCfg *apiConfig) createChirpHandler(w http.ResponseWriter, req *http.Req
 }
 
 func (apiCfg *apiConfig) getChirpsHandler(w http.ResponseWriter, req *http.Request) {
-	chirps, err := apiCfg.dbQueries.GetChirps(req.Context())
+	authorId := req.URL.Query().Get("author_id")
+
+	sortDirection := req.URL.Query().Get("sort")
+
+	var chirps []database.Chirp
+	var err error
+
+	if authorId == "" {
+		chirps, err = apiCfg.dbQueries.GetChirps(req.Context())
+	} else {
+		userId, _ := uuid.Parse(authorId)
+		chirps, err = apiCfg.dbQueries.GetChirpsByUserId(req.Context(), userId)
+	}
 
 	if err != nil {
 		respondWithError(w, "Error getting chirps", http.StatusInternalServerError)
 		log.Printf("Error fetching chirps from database: %s\n", err)
+		return
+	}
+
+	switch sortDirection {
+	case "asc", "":
+		sort.Slice(chirps, func(i, j int) bool {
+			return chirps[i].CreatedAt.Before(chirps[j].CreatedAt)
+		})
+	case "desc":
+		sort.Slice(chirps, func(i, j int) bool {
+			return chirps[i].CreatedAt.After(chirps[j].CreatedAt)
+		})
+	default:
+		respondWithError(w, "Invalid sort parameter", http.StatusForbidden)
+		log.Println("User passed invalid value on sort parameter")
 		return
 	}
 
@@ -439,6 +471,56 @@ func (apiCfg *apiConfig) deleteChirpByIdHandler(w http.ResponseWriter, req *http
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (apiCfg *apiConfig) webhookHandler(w http.ResponseWriter, req *http.Request) {
+	apiKey, err := auth.GetAPIKey(req.Header)
+
+	if err != nil {
+		respondWithError(w, "Invalid API key format", http.StatusUnauthorized)
+		log.Printf("Error parsing APIKey from header: %s\n", err)
+		return
+	}
+
+	if apiCfg.polkaKey != apiKey {
+		respondWithError(w, "Unauthorized", http.StatusUnauthorized)
+		log.Println("API key does not match")
+		return
+	}
+
+	type requestJson struct {
+		Event string `json:"event"`
+		Data  struct {
+			UserID uuid.UUID `json:"user_id"`
+		} `json:"data"`
+	}
+
+	var params requestJson
+
+	decoder := json.NewDecoder(req.Body)
+	err = decoder.Decode(&params)
+
+	if err != nil {
+		respondWithError(w, "Something went wrong", http.StatusInternalServerError)
+		log.Printf("Error decoding json request: %s\n", err)
+		return
+	}
+
+	if params.Event != "user.upgraded" {
+		w.WriteHeader(http.StatusNoContent)
+		log.Println("Unhandled event")
+		return
+	}
+
+	err = apiCfg.dbQueries.UpgradeUserById(req.Context(), params.Data.UserID)
+
+	if err != nil {
+		respondWithError(w, "User not found", http.StatusNotFound)
+		log.Printf("Error updating user: %s\n", err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 type chirpResponse struct {
 	ID        string    `json:"id"`
 	CreatedAt time.Time `json:"created_at"`
@@ -453,10 +535,11 @@ type userRequest struct {
 }
 
 type userResponse struct {
-	ID        string    `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
+	ID          string    `json:"id"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	Email       string    `json:"email"`
+	IsChirpyRed bool      `json:"is_chirpy_red"`
 }
 
 func cleanBody(body string) string {
