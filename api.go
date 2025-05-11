@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -58,8 +59,77 @@ func (apiCfg *apiConfig) createUserHandler(w http.ResponseWriter, req *http.Requ
 	log.Println("User created sucessfully.")
 }
 
-func (apiCfg *apiConfig) loginHandler(w http.ResponseWriter, req *http.Request) {
+func (apiCfg *apiConfig) updateUserHandler(w http.ResponseWriter, req *http.Request) {
+	token, err := auth.GetBearerToken(req.Header)
+
+	if err != nil {
+		respondWithError(w, "Something went wrong", http.StatusUnauthorized)
+		log.Printf("Error loading token from header: %s\n", err)
+		return
+	}
+
+	usrID, err := auth.ValidadeJWT(token, apiCfg.secret)
+
+	if err != nil {
+		respondWithError(w, "Unauthorized", http.StatusUnauthorized)
+		log.Printf("Error validating token: %s\n", err)
+		return
+	}
+
+	type userRequest struct {
+		Password string `json:"password"`
+		Email    string `json:"email"`
+	}
+
 	var params userRequest
+
+	decoder := json.NewDecoder(req.Body)
+	err = decoder.Decode(&params)
+
+	if err != nil {
+		respondWithError(w, "Something went wrong while parsing the request body", http.StatusInternalServerError)
+		log.Printf("Error decoding json request: %s\n", err)
+		return
+	}
+
+	hashedPass, err := auth.HashPassword(params.Password)
+
+	if err != nil {
+		respondWithError(w, "Something went wrong while setting the password", http.StatusInternalServerError)
+		log.Printf("Error hashing password: %s\n", err)
+		return
+	}
+
+	usr, err := apiCfg.dbQueries.UpdateUserForId(req.Context(), database.UpdateUserForIdParams{
+		ID:             usrID,
+		Email:          params.Email,
+		HashedPassword: hashedPass,
+	})
+
+	if err != nil {
+		respondWithError(w, "Unauthorized", http.StatusUnauthorized)
+		log.Printf("No user found for id: %s\n", err)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, userResponse{
+		ID:        usr.ID.String(),
+		CreatedAt: usr.CreatedAt,
+		UpdatedAt: usr.UpdatedAt,
+		Email:     usr.Email,
+	})
+
+	log.Println("User updated sucessfully.")
+
+}
+
+func (apiCfg *apiConfig) loginHandler(w http.ResponseWriter, req *http.Request) {
+	type loginRequest struct {
+		Password string `json:"password"`
+		Email    string `json:"email"`
+	}
+
+	var params loginRequest
 
 	decoder := json.NewDecoder(req.Body)
 	err := decoder.Decode(&params)
@@ -86,24 +156,151 @@ func (apiCfg *apiConfig) loginHandler(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	respondWithJSON(w, http.StatusOK, userResponse{
-		ID:        user.ID.String(),
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     user.Email,
+	jwt, err := auth.MakeJWT(user.ID, apiCfg.secret, time.Duration(1)*time.Hour)
+
+	if err != nil {
+		respondWithError(w, "Something went wrong", http.StatusInternalServerError)
+		log.Printf("Error generating token: %s\n", err)
+		return
+	}
+
+	refreshTokenString, err := auth.MakeRefreshToken()
+
+	if err != nil {
+		respondWithError(w, "Something went wrong", http.StatusInternalServerError)
+		log.Printf("Error generating refresh token: %s\n", err)
+		return
+	}
+
+	_, err = apiCfg.dbQueries.CreateRefreshToken(req.Context(), database.CreateRefreshTokenParams{
+		Token:     refreshTokenString,
+		UserID:    user.ID,
+		ExpiresAt: time.Now().Add(time.Duration(60*24) * time.Hour),
+		RevokedAt: sql.NullTime{Valid: false},
+	})
+
+	if err != nil {
+		respondWithError(w, "Something went wrong", http.StatusInternalServerError)
+		log.Printf("Error creating refresh token in the database: %s\n", err)
+		return
+	}
+
+	type loginResponse struct {
+		ID           string    `json:"id"`
+		CreatedAt    time.Time `json:"created_at"`
+		UpdatedAt    time.Time `json:"updated_at"`
+		Email        string    `json:"email"`
+		Token        string    `json:"token"`
+		RefreshToken string    `json:"refresh_token"`
+	}
+
+	respondWithJSON(w, http.StatusOK, loginResponse{
+		ID:           user.ID.String(),
+		CreatedAt:    user.CreatedAt,
+		UpdatedAt:    user.UpdatedAt,
+		Email:        user.Email,
+		Token:        jwt,
+		RefreshToken: refreshTokenString,
 	})
 }
 
+func (apiCfg *apiConfig) refreshTokenHandler(w http.ResponseWriter, req *http.Request) {
+	refreshToken, err := auth.GetBearerToken(req.Header)
+
+	if err != nil {
+		respondWithError(w, "Something went wrong", http.StatusInternalServerError)
+		log.Printf("Error loading token from header: %s\n", err)
+		return
+	}
+
+	tokenObj, err := apiCfg.dbQueries.GetRefreshTokenByToken(req.Context(), refreshToken)
+
+	if err != nil {
+		respondWithError(w, "Unauthorized", http.StatusUnauthorized)
+		log.Printf("Error looking up refresh token: %s\n", err)
+		return
+	}
+
+	if tokenObj.RevokedAt.Valid {
+		respondWithError(w, "Unauthorized - token revoked", http.StatusUnauthorized)
+		return
+	}
+
+	if time.Now().After(tokenObj.ExpiresAt) {
+		respondWithError(w, "Unauthorized - token expired", http.StatusUnauthorized)
+		return
+	}
+
+	usr, err := apiCfg.dbQueries.GetUserById(req.Context(), tokenObj.UserID)
+
+	if err != nil {
+		respondWithError(w, "Unauthorized", http.StatusUnauthorized)
+		log.Printf("Error looking up user: %s\n", err)
+		return
+	}
+
+	jwt, err := auth.MakeJWT(usr.ID, apiCfg.secret, time.Duration(1)*time.Hour)
+
+	if err != nil {
+		respondWithError(w, "Something went wrong", http.StatusInternalServerError)
+		log.Printf("Error generating token: %s\n", err)
+		return
+	}
+
+	type responseJSON struct {
+		Token string `json:"token"`
+	}
+
+	respondWithJSON(w, http.StatusOK, responseJSON{
+		Token: jwt,
+	})
+}
+
+func (apiCfg *apiConfig) revokeRefreshTokenHandler(w http.ResponseWriter, req *http.Request) {
+	refreshToken, err := auth.GetBearerToken(req.Header)
+
+	if err != nil {
+		respondWithError(w, "Something went wrong", http.StatusInternalServerError)
+		log.Printf("Error loading token from header: %s\n", err)
+		return
+	}
+
+	err = apiCfg.dbQueries.RevokeRefreshToken(req.Context(), refreshToken)
+
+	if err != nil {
+		respondWithError(w, "Something went wrong", http.StatusInternalServerError)
+		log.Printf("Error error updating data base with revoked token: %s\n", err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (apiCfg *apiConfig) createChirpHandler(w http.ResponseWriter, req *http.Request) {
+	token, err := auth.GetBearerToken(req.Header)
+
+	if err != nil {
+		respondWithError(w, "Something went wrong", http.StatusInternalServerError)
+		log.Printf("Error loading token from header: %s\n", err)
+		return
+	}
+
+	usrID, err := auth.ValidadeJWT(token, apiCfg.secret)
+
+	if err != nil {
+		respondWithError(w, "Unauthorized", http.StatusUnauthorized)
+		log.Printf("Error validating token: %s\n", err)
+		return
+	}
+
 	type parameters struct {
-		Body   string    `json:"body"`
-		UserId uuid.UUID `json:"user_id"`
+		Body string `json:"body"`
 	}
 
 	decoder := json.NewDecoder(req.Body)
 	params := parameters{}
 
-	err := decoder.Decode(&params)
+	err = decoder.Decode(&params)
 	if err != nil {
 		respondWithError(w, "Something went wrong", http.StatusInternalServerError)
 		log.Printf("Error decoding json request: %s\n", err)
@@ -120,7 +317,7 @@ func (apiCfg *apiConfig) createChirpHandler(w http.ResponseWriter, req *http.Req
 
 	chirp, err := apiCfg.dbQueries.CreateChirp(req.Context(), database.CreateChirpParams{
 		Body:   params.Body,
-		UserID: params.UserId,
+		UserID: usrID,
 	})
 
 	if err != nil {
@@ -190,6 +387,56 @@ func (apiCfg *apiConfig) getChirpByIdHandler(w http.ResponseWriter, req *http.Re
 	})
 
 	log.Printf("Successfuly returned chirp object")
+}
+
+func (apiCfg *apiConfig) deleteChirpByIdHandler(w http.ResponseWriter, req *http.Request) {
+	token, err := auth.GetBearerToken(req.Header)
+
+	if err != nil {
+		respondWithError(w, "Something went wrong", http.StatusUnauthorized)
+		log.Printf("Error loading token from header: %s\n", err)
+		return
+	}
+
+	usrID, err := auth.ValidadeJWT(token, apiCfg.secret)
+
+	if err != nil {
+		respondWithError(w, "Unauthorized", http.StatusUnauthorized)
+		log.Printf("Error validating token: %s\n", err)
+		return
+	}
+
+	chirpID, err := uuid.Parse(req.PathValue("chirpID"))
+
+	if err != nil {
+		respondWithError(w, "Invalid ID", http.StatusInternalServerError)
+		log.Printf("Error validating UUID: %s\n", err)
+		return
+	}
+
+	chirp, err := apiCfg.dbQueries.GetChirpById(req.Context(), chirpID)
+
+	if err != nil {
+		respondWithError(w, "Error getting chirp from the database", http.StatusNotFound)
+		log.Printf("Chirp id not found: %s\n", err)
+		return
+	}
+
+	if chirp.UserID != usrID {
+		respondWithError(w, "Forbiden", http.StatusForbidden)
+		log.Println("Chirp does not belong to this user")
+		return
+	}
+
+	err = apiCfg.dbQueries.DeleteChirpById(req.Context(), chirpID)
+
+	if err != nil {
+		respondWithError(w, "Error getting chirp from the database", http.StatusNotFound)
+		log.Printf("Error deleting chirp: %s\n", err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 type chirpResponse struct {
